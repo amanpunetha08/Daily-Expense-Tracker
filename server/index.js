@@ -8,8 +8,10 @@ const app = express()
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
 
-app.use(cors({ origin: 'http://localhost:5173' }))
+app.use(cors({ origin: true, credentials: true }))
 app.use(express.json())
+
+console.log('GOOGLE_CLIENT_ID loaded:', process.env.GOOGLE_CLIENT_ID ? 'yes' : 'NO - MISSING!')
 
 // Middleware: verify Google token
 async function auth(req, res, next) {
@@ -18,7 +20,6 @@ async function auth(req, res, next) {
   try {
     const ticket = await client.verifyIdToken({ idToken: token, audience: process.env.GOOGLE_CLIENT_ID })
     const { sub, email, name, picture } = ticket.getPayload()
-    // Upsert user
     await pool.query(
       `INSERT INTO users (google_id, email, name, picture) VALUES ($1,$2,$3,$4)
        ON CONFLICT (google_id) DO UPDATE SET email=$2, name=$3, picture=$4`,
@@ -26,8 +27,9 @@ async function auth(req, res, next) {
     )
     req.user = { google_id: sub, email, name, picture }
     next()
-  } catch {
-    res.status(401).json({ error: 'Invalid token' })
+  } catch (err) {
+    console.error('Auth failed:', err.message)
+    res.status(401).json({ error: 'Invalid token', detail: err.message })
   }
 }
 
