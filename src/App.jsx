@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react'
 import './App.css'
 
 const API = 'http://localhost:3001/api'
@@ -6,8 +6,10 @@ const CLIENT_ID = '1047002583869-88qg66d397r239kmj6ffr1gfgqjg4vc6.apps.googleuse
 const CATEGORIES = ['Food', 'Transport', 'Shopping', 'Bills', 'Entertainment', 'Health', 'Other']
 const COLORS = { Food:'#ff6b6b', Transport:'#4ecdc4', Shopping:'#45b7d1', Bills:'#f9ca24', Entertainment:'#a55eea', Health:'#26de81', Other:'#778ca3' }
 
-function api(path, token, opts = {}) {
-  return fetch(`${API}${path}`, { ...opts, headers: { 'Content-Type':'application/json', Authorization:`Bearer ${token}`, ...opts.headers } }).then(r => r.json())
+async function api(path, token, opts = {}) {
+  const res = await fetch(`${API}${path}`, { ...opts, headers: { 'Content-Type':'application/json', Authorization:`Bearer ${token}`, ...opts.headers } })
+  if (!res.ok) throw new Error(`API error: ${res.status}`)
+  return res.json()
 }
 
 function App() {
@@ -16,8 +18,20 @@ function App() {
   const [expenses, setExpenses] = useState([])
   const [form, setForm] = useState({ description:'', amount:'', category:'Food', date:new Date().toISOString().split('T')[0] })
   const [filter, setFilter] = useState('All')
+  const loginRef = useRef()
 
-  // Load Google Sign-In script
+  // Store login handler in ref so Google callback always gets latest
+  loginRef.current = async (response) => {
+    const idToken = response.credential
+    try {
+      const userData = await api('/auth', idToken, { method:'POST' })
+      setToken(idToken)
+      setUser(userData)
+    } catch (err) {
+      console.error('Login failed:', err)
+    }
+  }
+
   useEffect(() => {
     const script = document.createElement('script')
     script.src = 'https://accounts.google.com/gsi/client'
@@ -25,23 +39,19 @@ function App() {
     script.onload = () => {
       window.google.accounts.id.initialize({
         client_id: CLIENT_ID,
-        callback: handleLogin,
+        callback: (res) => loginRef.current(res),
       })
       window.google.accounts.id.renderButton(document.getElementById('g-btn'), { theme:'outline', size:'large', width:300 })
     }
     document.body.appendChild(script)
   }, [])
 
-  const handleLogin = async (response) => {
-    const idToken = response.credential
-    setToken(idToken)
-    const userData = await api('/auth', idToken, { method:'POST' })
-    setUser(userData)
-  }
-
   const loadExpenses = useCallback(async () => {
     if (!token) return
-    setExpenses(await api('/expenses', token))
+    try {
+      const data = await api('/expenses', token)
+      setExpenses(Array.isArray(data) ? data : [])
+    } catch { setExpenses([]) }
   }, [token])
 
   useEffect(() => { loadExpenses() }, [loadExpenses])
