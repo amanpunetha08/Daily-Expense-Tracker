@@ -252,4 +252,45 @@ app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
   finally { fs.unlink(fp, () => {}) }
 })
 
+// ─── WHATSAPP NOTIFICATION SETTINGS ───
+app.get('/api/notification-settings', auth, async (req, res) => {
+  const { rows } = await pool.query('SELECT phone, whatsapp_optin FROM users WHERE google_id=$1', [req.user.google_id])
+  res.json(rows[0] || { phone: null, whatsapp_optin: false })
+})
+
+app.post('/api/notification-settings', auth, async (req, res) => {
+  const { phone, whatsapp_optin } = req.body
+  await pool.query('UPDATE users SET phone=$1, whatsapp_optin=$2 WHERE google_id=$3', [phone || null, !!whatsapp_optin, req.user.google_id])
+  res.json({ ok: true })
+})
+
+// ─── CRON: Send WhatsApp reminders ───
+app.get('/api/cron/whatsapp-reminder', async (req, res) => {
+  // Verify cron secret to prevent unauthorized calls
+  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+  try {
+    const twilio = (await import('twilio')).default
+    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN)
+    const { rows: users } = await pool.query('SELECT name, phone FROM users WHERE whatsapp_optin=true AND phone IS NOT NULL')
+    const appUrl = process.env.APP_URL || 'https://daily-expense-tracker-six-omega.vercel.app'
+    let sent = 0
+    for (const user of users) {
+      try {
+        await client.messages.create({
+          from: process.env.TWILIO_WHATSAPP_FROM,
+          to: `whatsapp:${user.phone}`,
+          body: `Hey ${user.name || 'there'}! 👋 Don't forget to log today's expenses. Track your spending here: ${appUrl}`
+        })
+        sent++
+      } catch (err) { console.error(`Failed to send to ${user.phone}:`, err.message) }
+    }
+    res.json({ sent, total: users.length })
+  } catch (err) {
+    console.error('Cron error:', err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 export default app

@@ -350,4 +350,15 @@ app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
   } finally { fs.unlink(fp, () => {}) }
 })
 
+app.get('/api/notification-settings', auth, async (req, res) => {
+  const { rows } = await pool.query('SELECT phone, whatsapp_optin FROM users WHERE google_id=$1', [req.user.google_id])
+  res.json(rows[0] || { phone: null, whatsapp_optin: false })
+})
+
+app.post('/api/notification-settings', auth, async (req, res) => {
+  const { phone, whatsapp_optin } = req.body
+  await pool.query('UPDATE users SET phone=$1, whatsapp_optin=$2 WHERE google_id=$3', [phone || null, !!whatsapp_optin, req.user.google_id])
+  res.json({ ok: true })
+})
+
 app.listen(process.env.PORT || 3001, () => console.log(`Server on port ${process.env.PORT || 3001}`))
