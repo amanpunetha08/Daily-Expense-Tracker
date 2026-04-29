@@ -293,4 +293,48 @@ app.get('/api/cron/whatsapp-reminder', async (req, res) => {
   }
 })
 
+// ─── WEB PUSH ───
+app.get('/api/push/vapid-key', (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY })
+})
+
+app.post('/api/push/subscribe', auth, async (req, res) => {
+  const { subscription } = req.body
+  if (!subscription) return res.status(400).json({ error: 'No subscription' })
+  await pool.query(
+    `INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)
+     ON CONFLICT (user_id, subscription) DO NOTHING`,
+    [req.user.google_id, JSON.stringify(subscription)]
+  )
+  res.json({ ok: true })
+})
+
+app.post('/api/push/unsubscribe', auth, async (req, res) => {
+  await pool.query('DELETE FROM push_subscriptions WHERE user_id=$1', [req.user.google_id])
+  res.json({ ok: true })
+})
+
+app.get('/api/cron/push-reminder', async (req, res) => {
+  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) return res.status(401).json({ error: 'Unauthorized' })
+  try {
+    const webpush = (await import('web-push')).default
+    webpush.setVapidDetails('mailto:expense-tracker@app.com', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY)
+    const { rows } = await pool.query('SELECT ps.subscription, u.name FROM push_subscriptions ps JOIN users u ON ps.user_id = u.google_id')
+    const appUrl = process.env.APP_URL || 'https://daily-expense-tracker-six-omega.vercel.app'
+    let sent = 0
+    for (const row of rows) {
+      try {
+        await webpush.sendNotification(
+          typeof row.subscription === 'string' ? JSON.parse(row.subscription) : row.subscription,
+          JSON.stringify({ title: '💰 Log Your Expenses!', body: `Hey ${row.name || 'there'}! Don't forget to track today's spending.`, url: appUrl })
+        )
+        sent++
+      } catch (err) {
+        if (err.statusCode === 410 || err.statusCode === 404) await pool.query('DELETE FROM push_subscriptions WHERE subscription=$1', [JSON.stringify(row.subscription)])
+      }
+    }
+    res.json({ sent, total: rows.length })
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 export default app

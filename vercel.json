@@ -7,6 +7,10 @@
   ],
   "crons": [
     {
+      "path": "/api/cron/push-reminder",
+      "schedule": "30 3 * * *"
+    },
+    {
       "path": "/api/cron/whatsapp-reminder",
       "schedule": "30 3 * * *"
     }

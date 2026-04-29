@@ -361,4 +361,24 @@ app.post('/api/notification-settings', auth, async (req, res) => {
   res.json({ ok: true })
 })
 
+app.get('/api/push/vapid-key', (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY })
+})
+
+app.post('/api/push/subscribe', auth, async (req, res) => {
+  const { subscription } = req.body
+  if (!subscription) return res.status(400).json({ error: 'No subscription' })
+  await pool.query(
+    `INSERT INTO push_subscriptions (user_id, subscription) VALUES ($1, $2)
+     ON CONFLICT (user_id, subscription) DO NOTHING`,
+    [req.user.google_id, JSON.stringify(subscription)]
+  )
+  res.json({ ok: true })
+})
+
+app.post('/api/push/unsubscribe', auth, async (req, res) => {
+  await pool.query('DELETE FROM push_subscriptions WHERE user_id=$1', [req.user.google_id])
+  res.json({ ok: true })
+})
+
 app.listen(process.env.PORT || 3001, () => console.log(`Server on port ${process.env.PORT || 3001}`))
