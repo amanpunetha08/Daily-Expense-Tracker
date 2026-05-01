@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
 import { api, uploadFile } from '../api'
-import { Plus, Trash2, Pencil, Upload, X, Check } from 'lucide-react'
+import { Plus, Trash2, Pencil, Upload, X, Check, Mail, Loader2 } from 'lucide-react'
 
 const CATEGORIES = ['Dairy', 'Vegetables', 'Household', 'Personal Care', 'Frozen Food', 'Grocery / Spices', 'Transport', 'Bills', 'Entertainment', 'Health', 'Other']
 const CAT_COLORS = { Dairy:'#4f46e5', Vegetables:'#10b981', Household:'#f59e0b', 'Personal Care':'#ec4899', 'Frozen Food':'#06b6d4', 'Grocery / Spices':'#f97316', Transport:'#8b5cf6', Bills:'#ef4444', Entertainment:'#a855f6', Health:'#14b8a6', Other:'#78716c' }
 
 const empty = { description: '', amount: '', category: 'Other', date: new Date().toISOString().split('T')[0], product_name: '', quantity: 1, size: '', mrp: '' }
 
-export default function Expenses({ month }) {
+export default function Expenses({ month, getGmailToken }) {
   const [expenses, setExpenses] = useState([])
   const [form, setForm] = useState({ ...empty })
   const [editing, setEditing] = useState(null)
@@ -16,9 +16,22 @@ export default function Expenses({ month }) {
   const [uploading, setUploading] = useState(false)
   const [catLoading, setCatLoading] = useState(false)
   const fileRef = useRef()
+  // Email sync
+  const [syncing, setSyncing] = useState(false)
+  const [syncProvider, setSyncProvider] = useState(null)
+  const [syncItems, setSyncItems] = useState(null)
+  const [syncError, setSyncError] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importDone, setImportDone] = useState(false)
+  const [bulkProgress, setBulkProgress] = useState(null)
+  const [syncedProviders, setSyncedProviders] = useState([])
 
   const load = () => api(`/expenses?month=${month}`).then(setExpenses).catch(() => {})
   useEffect(() => { load() }, [month])
+
+  useEffect(() => {
+    api('/sync-status').then(d => setSyncedProviders(d.synced || [])).catch(() => {})
+  }, [])
 
   // Smart categorization — auto-classify when product name changes
   const handleProductChange = async (val) => {
@@ -66,13 +79,70 @@ export default function Expenses({ month }) {
     setUploadItems(null); load()
   }
 
+  const syncProvider_ = async (name) => {
+    const needsBulk = !syncedProviders.includes(name)
+    if (needsBulk) return syncAllMonths(name)
+    setSyncing(true); setSyncProvider(name); setSyncError(''); setSyncItems(null); setImportDone(false)
+    try {
+      const token = await getGmailToken()
+      const data = await api(`/sync/${name}`, { method: 'POST', body: JSON.stringify({ gmail_token: token, month }) })
+      setSyncItems(data.items || [])
+    } catch (err) { setSyncError(err.message || 'Failed to sync') }
+    setSyncing(false)
+  }
+
+  const importSyncItems = async () => {
+    if (!syncItems?.length) return
+    setImporting(true)
+    try {
+      await api('/expenses/bulk', { method: 'POST', body: JSON.stringify({ items: syncItems }) })
+      setImportDone(true); setSyncItems(null); load()
+    } catch (err) { setSyncError('Import failed: ' + err.message) }
+    setImporting(false)
+  }
+
+  const syncAllMonths = async (name) => {
+    setSyncing(true); setSyncProvider(name); setSyncError(''); setSyncItems(null); setImportDone(false)
+    try {
+      const token = await getGmailToken()
+      const now = new Date()
+      const months = []
+      for (let y = 2025, m = 1; ; m++) {
+        if (m > 12) { m = 1; y++ }
+        months.push(`${y}-${String(m).padStart(2, '0')}`)
+        if (y === now.getFullYear() && m === now.getMonth() + 1) break
+      }
+      let totalImported = 0
+      for (let i = 0; i < months.length; i++) {
+        setBulkProgress({ current: i + 1, total: months.length, month: months[i], imported: totalImported })
+        const data = await api(`/sync/${name}`, { method: 'POST', body: JSON.stringify({ gmail_token: token, month: months[i] }) })
+        if (data.items?.length) {
+          await api('/expenses/bulk', { method: 'POST', body: JSON.stringify({ items: data.items }) })
+          totalImported += data.items.length
+        }
+      }
+      setBulkProgress(null); setImportDone(true); load()
+      setSyncedProviders(p => [...p, name])
+      await api('/sync-status', { method: 'POST', body: JSON.stringify({ provider: name }) })
+    } catch (err) { setSyncError(err.message || 'Bulk sync failed') }
+    setSyncing(false); setBulkProgress(null)
+  }
+
   const total = expenses.reduce((s, e) => s + Number(e.amount), 0)
 
   return (
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <h2 className="text-lg sm:text-xl font-bold text-gray-800">Expenses — {month}</h2>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          {[['swiggy', '🍔 Swiggy', 'bg-orange-500 hover:bg-orange-600'], ['zepto', '⚡ Zepto', 'bg-purple-500 hover:bg-purple-600']].map(([key, label, color]) => (
+            <button key={key} onClick={() => syncProvider_(key)} disabled={syncing}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white ${syncing ? 'opacity-50' : color}`}>
+              {syncing && syncProvider === key
+                ? <><Loader2 size={16} className="animate-spin" />{bulkProgress ? `${bulkProgress.month} (${bulkProgress.current}/${bulkProgress.total})` : 'Syncing...'}</>
+                : label}
+            </button>
+          ))}
           <label className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium cursor-pointer ${uploading ? 'bg-gray-200 text-gray-500' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}>
             <Upload size={16} />{uploading ? 'Processing...' : 'Upload Receipt'}
             <input type="file" ref={fileRef} accept="image/*,.pdf,.xlsx,.xls,.csv" onChange={handleUpload} hidden disabled={uploading} />
@@ -110,6 +180,37 @@ export default function Expenses({ month }) {
             ))}
           </div>
         </div>
+      )}
+
+      {/* Swiggy Sync Results */}
+      {syncError && <div className="bg-red-50 rounded-xl p-4 text-sm text-red-700">❌ {syncError}</div>}
+      {importDone && <div className="bg-green-50 rounded-xl p-4 text-sm text-green-700">✅ Swiggy orders imported!</div>}
+      {bulkProgress && <div className="bg-orange-50 rounded-xl p-4 text-sm text-orange-700">📦 Syncing {bulkProgress.month} ({bulkProgress.current}/{bulkProgress.total}) — {bulkProgress.imported} items imported so far</div>}
+      {syncItems && (
+        syncItems.length === 0
+          ? <div className="bg-yellow-50 rounded-xl p-4 text-sm text-yellow-700">No Swiggy orders found for {month}.</div>
+          : <div className="bg-white rounded-xl p-5 border-2 border-orange-400 shadow-sm space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-gray-800">🍔 Swiggy Orders ({syncItems.length}) — ₹{syncItems.reduce((s, i) => s + i.amount, 0).toLocaleString('en-IN')}</h3>
+                <div className="flex gap-2">
+                  <button onClick={importSyncItems} disabled={importing} className="flex items-center gap-1 px-3 py-1.5 bg-green-500 text-white rounded-lg text-sm">
+                    {importing ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}{importing ? 'Importing...' : 'Add All'}
+                  </button>
+                  <button onClick={() => setSyncItems(null)} className="flex items-center gap-1 px-3 py-1.5 bg-red-500 text-white rounded-lg text-sm"><X size={14} />Cancel</button>
+                </div>
+              </div>
+              <div className="max-h-60 overflow-y-auto space-y-2">
+                {syncItems.map((item, i) => (
+                  <div key={i} className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                    <div>
+                      <div className="text-sm font-medium text-gray-800">{item.description}</div>
+                      <div className="text-xs text-gray-500">{item.date}</div>
+                    </div>
+                    <div className="text-sm font-semibold text-gray-800">₹{item.amount.toLocaleString('en-IN')}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
       )}
 
       {/* Add/Edit Form */}

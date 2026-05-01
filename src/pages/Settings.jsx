@@ -163,6 +163,8 @@ export default function Settings({ month }) {
         </button>
       </form>
 
+      {/* Swiggy sync moved to Expenses page */}
+
       <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
         <h3 className="font-semibold text-gray-800 mb-3">How it works</h3>
         <ul className="text-sm text-gray-600 space-y-2">

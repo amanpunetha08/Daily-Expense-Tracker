@@ -1,4 +1,4 @@
-const API = import.meta.env.DEV ? 'http://localhost:3001/api' : '/api'
+const API = import.meta.env.DEV ? 'http://localhost:8000/api' : '/api'
 
 let _token = null
 export const setToken = (t) => { _token = t }

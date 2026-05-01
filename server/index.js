@@ -350,6 +350,101 @@ app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
   } finally { fs.unlink(fp, () => {}) }
 })
 
+// ─── EMAIL SYNC (Swiggy, Zepto) ───
+const SYNC_PROVIDERS = {
+  swiggy: { from: 'noreply@swiggy.in', label: 'Swiggy' },
+  zepto: { from: 'noreply@zeptonow.com', label: 'Zepto' },
+}
+
+async function gmailFetch(accessToken, url) {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error?.message || `Gmail API ${res.status}`)
+  return data
+}
+
+function findPdfAttachment(payload) {
+  const parts = payload.parts || []
+  for (const part of parts) {
+    if (part.filename?.toLowerCase().endsWith('.pdf') && part.body?.attachmentId) return { id: part.body.attachmentId, name: part.filename }
+    if (part.parts) { const found = findPdfAttachment(part); if (found) return found }
+  }
+  return null
+}
+
+async function parsePdfBuffer(buf) {
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const doc = await getDocument({ data: new Uint8Array(buf) }).promise
+  let text = ''
+  for (let i = 1; i <= doc.numPages; i++) {
+    const pg = await doc.getPage(i)
+    const c = await pg.getTextContent()
+    text += c.items.map(x => x.str).join(' ') + '\n'
+  }
+  return text
+}
+
+app.post('/api/sync/:provider', auth, async (req, res) => {
+  const provider = SYNC_PROVIDERS[req.params.provider]
+  if (!provider) return res.status(400).json({ error: 'Unknown provider' })
+  const { gmail_token, month } = req.body
+  if (!gmail_token) return res.status(400).json({ error: 'Gmail token required' })
+
+  const [year, mon] = (month || new Date().toISOString().slice(0, 7)).split('-')
+  const after = `${year}/${mon}/01`
+  const lastDay = new Date(Number(year), Number(mon), 0).getDate()
+  const before = `${year}/${mon}/${lastDay}`
+
+  try {
+    const query = `from:${provider.from} has:attachment filename:pdf after:${after} before:${before}`
+    const listData = await gmailFetch(gmail_token,
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=50`)
+
+    if (!listData.messages?.length) return res.json({ items: [], message: `No ${provider.label} invoices found` })
+
+    const items = []
+    for (const msg of listData.messages) {
+      try {
+        const detail = await gmailFetch(gmail_token,
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`)
+        const headers = detail.payload?.headers || []
+        const dateHeader = headers.find(h => h.name.toLowerCase() === 'date')?.value || ''
+        const emailDate = dateHeader ? new Date(dateHeader).toISOString().split('T')[0] : `${year}-${mon}-01`
+
+        const pdf = findPdfAttachment(detail.payload)
+        if (!pdf) continue
+
+        const attData = await gmailFetch(gmail_token,
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}/attachments/${pdf.id}`)
+        const pdfBuf = Buffer.from(attData.data.replace(/-/g, '+').replace(/_/g, '/'), 'base64')
+        const text = await parsePdfBuffer(pdfBuf)
+        const raw = await groq([{ role: 'user', content: EXTRACT_PROMPT + '\n\nReceipt text:\n' + text.slice(0, 4000) }], 2000)
+        const parsed = parseJSON(raw) || []
+
+        for (const item of parsed) {
+          if (!item.description || !item.amount || item.amount <= 0) continue
+          items.push({ ...item, date: emailDate, category: CATEGORIES.includes(item.category) ? item.category : 'Other', mrp: item.mrp || item.amount, quantity: item.quantity || 1, email_id: msg.id })
+        }
+      } catch (e) { console.error(`${provider.label} parse error:`, e.message) }
+    }
+    res.json({ items, total: items.length })
+  } catch (err) {
+    console.error(`${provider.label} sync error:`, err.message)
+    res.status(500).json({ error: 'Failed to fetch emails: ' + err.message })
+  }
+})
+
+app.get('/api/sync-status', auth, async (req, res) => {
+  const { rows } = await pool.query('SELECT synced_providers FROM users WHERE google_id=$1', [req.user.google_id])
+  res.json({ synced: rows[0]?.synced_providers || [] })
+})
+
+app.post('/api/sync-status', auth, async (req, res) => {
+  const { provider } = req.body
+  await pool.query(`UPDATE users SET synced_providers = array_append(COALESCE(synced_providers, '{}'), $1) WHERE google_id=$2 AND NOT ($1 = ANY(COALESCE(synced_providers, '{}')))`, [provider, req.user.google_id])
+  res.json({ ok: true })
+})
+
 app.get('/api/notification-settings', auth, async (req, res) => {
   const { rows } = await pool.query('SELECT phone, whatsapp_optin FROM users WHERE google_id=$1', [req.user.google_id])
   res.json(rows[0] || { phone: null, whatsapp_optin: false })
@@ -381,4 +476,7 @@ app.post('/api/push/unsubscribe', auth, async (req, res) => {
   res.json({ ok: true })
 })
 
-app.listen(process.env.PORT || 3001, () => console.log(`Server on port ${process.env.PORT || 3001}`))
+app.listen(process.env.PORT || 3001, async () => {
+  await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS synced_providers TEXT[] DEFAULT '{}'`).catch(() => {})
+  console.log(`Server on port ${process.env.PORT || 3001}`)
+})
