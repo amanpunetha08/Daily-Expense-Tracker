@@ -114,7 +114,7 @@ export default function App() {
     try {
       const endpoint = authMode === 'register' ? '/auth/register' : '/auth/login'
       const body = authMode === 'register' ? { email, password, name } : { email, password }
-      const res = await fetch(`${import.meta.env.DEV ? 'http://localhost:8000/api' : '/api'}${endpoint}`, {
+      const res = await fetch(`${import.meta.env.DEV ? 'http://localhost:8000/api' : 'https://daily-expense-backend-4clh.onrender.com/api'}${endpoint}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
       })
       const data = await res.json()
